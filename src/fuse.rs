@@ -175,7 +175,7 @@ impl Filesystem for FuseFS {
         self.ino_counter += 1;
 
         let ino = self.ino_counter;
-        let attr = create_file_attr(ino, _req.uid(), _req.gid());
+        let attr = create_attr(ino, _req.uid(), _req.gid(), fuser_FileType::RegularFile);
 
         let new_fileinfo = FileInfo {
             attr,
@@ -225,7 +225,21 @@ impl Filesystem for FuseFS {
         umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        dbg!("MKDIR");
+        dbg!("MKDIR", parent, name);
+
+        self.ino_counter += 1;
+        let ino = self.ino_counter;
+        let attr = create_attr(ino, _req.uid(), _req.gid(), fuser_FileType::Directory);
+        let new_fileinfo = FileInfo {
+            attr,
+            parent: Some(parent),
+            kind: fuser_FileType::Directory,
+            path: name.to_str().unwrap().to_owned(),
+        };
+
+        self.files.insert(ino, new_fileinfo);
+
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn rmdir(
@@ -305,7 +319,12 @@ impl Filesystem for FuseFS {
     }
 }
 
-fn create_file_attr(ino: Ino, uid: u32, gid: u32) -> FileAttr {
+fn create_attr(ino: Ino, uid: u32, gid: u32, kind: fuser_FileType) -> FileAttr {
+    let mut perm = 0o644;
+    if kind == fuser_FileType::Directory {
+        perm = 0o755;
+    }
+
     FileAttr {
         ino,
         size: 0,
@@ -314,8 +333,8 @@ fn create_file_attr(ino: Ino, uid: u32, gid: u32) -> FileAttr {
         mtime: SystemTime::now(),
         ctime: SystemTime::now(),
         crtime: SystemTime::now(),
-        kind: fuser_FileType::RegularFile,
-        perm: 0o644,
+        kind,
+        perm,
         nlink: 1,
         uid,
         gid,
