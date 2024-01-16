@@ -1,14 +1,12 @@
-use std::{fs, io};
+mod fuse;
 
+use crate::fuse::FuseFS;
 use fuser::MountOption;
-
-use crate::passthrough::PassthroughFS;
-
-mod passthrough;
+use std::{fs, io};
 
 fn main() -> io::Result<()> {
     let mountpoint = "/tmp/fusefs";
-    let passthrough_fs = PassthroughFS::new(mountpoint.to_owned());
+    let passthrough_fs = FuseFS::new(mountpoint.to_owned());
 
     if let Err(_) = fs::read_dir(mountpoint) {
         fs::create_dir(mountpoint)?
