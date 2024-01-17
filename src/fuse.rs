@@ -1,15 +1,13 @@
 use fuser::FileType as fuser_FileType;
 use fuser::{consts::FOPEN_KEEP_CACHE, FileAttr, Filesystem};
-use libc::ENOENT;
+use libc::{ENOENT, ENOTEMPTY};
 use std::{
     collections::HashMap,
-    fs::Metadata,
-    os::unix::fs::{MetadataExt, PermissionsExt},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const TTL: Duration = Duration::from_secs(1);
-const DIR_ATTR_INO1: FileAttr = FileAttr {
+const ROOT_DIR_ATTR: FileAttr = FileAttr {
     ino: 1,
     size: 0,
     blocks: 0,
@@ -36,6 +34,7 @@ pub struct FuseFS {
 
 type Ino = u64;
 
+#[derive(Debug)]
 struct FileInfo {
     parent: Option<Ino>,
     name: String,
@@ -57,8 +56,8 @@ impl FuseFS {
             FileInfo {
                 name: ".".to_owned(),
                 kind: fuser_FileType::Directory,
-                attr: DIR_ATTR_INO1,
-                parent: None,
+                attr: ROOT_DIR_ATTR,
+                parent: Some(1),
             },
         );
 
@@ -68,19 +67,6 @@ impl FuseFS {
 
 impl Filesystem for FuseFS {
     // Files
-    fn mknod(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        name: &std::ffi::OsStr,
-        mode: u32,
-        umask: u32,
-        rdev: u32,
-        reply: fuser::ReplyEntry,
-    ) {
-        dbg!("MKNOD");
-    }
-
     fn unlink(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -88,15 +74,16 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        dbg!("UNLINK");
-        let f = self
+        let file_to_remove = self
             .files
             .iter()
             .find(|(_, info)| info.name == name.to_str().unwrap());
 
-        if let Some((&ino, _)) = f {
-            self.files_data.remove(&ino);
-            self.files.remove(&ino);
+        if let Some((&ino, info)) = file_to_remove {
+            if info.kind == fuser_FileType::RegularFile {
+                self.files_data.remove(&ino);
+                self.files.remove(&ino);
+            }
         }
 
         reply.ok();
@@ -115,7 +102,6 @@ impl Filesystem for FuseFS {
         reply: fuser::ReplyWrite,
     ) {
         let is_append = offset > 0;
-        dbg!("WRITE", is_append);
 
         let filedata = self.files_data.get_mut(&ino).unwrap();
         if is_append {
@@ -131,8 +117,6 @@ impl Filesystem for FuseFS {
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        dbg!("OPEN", ino);
-
         let ino = self.files.keys().find(|&i| ino == *i);
 
         match ino {
@@ -157,7 +141,6 @@ impl Filesystem for FuseFS {
         lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        dbg!("READ");
         let filedata = self.files_data.get(&ino).unwrap();
 
         let start = offset as usize;
@@ -182,7 +165,6 @@ impl Filesystem for FuseFS {
         flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        dbg!("CREATE", parent, name);
         self.ino_counter += 1;
 
         let ino = self.ino_counter;
@@ -209,8 +191,6 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        dbg!("LOOKUP", parent, name);
-
         let file = self.files.iter().find(|(_, info)| {
             info.parent.is_some()
                 && info.parent.unwrap() == parent
@@ -236,8 +216,6 @@ impl Filesystem for FuseFS {
         umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        dbg!("MKDIR", parent, name);
-
         self.ino_counter += 1;
         let ino = self.ino_counter;
         let attr = create_attr(ino, _req.uid(), _req.gid(), fuser_FileType::Directory);
@@ -260,7 +238,32 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        dbg!("RMDIR");
+        let dir_to_remove = self
+            .files
+            .iter()
+            .find(|(_, info)| info.name == name.to_str().unwrap());
+
+        if let Some((&dir_ino, info)) = dir_to_remove {
+            if info.kind == fuser_FileType::Directory {
+                let not_empty = self
+                    .files
+                    .iter()
+                    .filter(|(_, info)| info.parent.is_some() && info.parent.unwrap() == dir_ino)
+                    .map(|(ino, _)| *ino)
+                    .count()
+                    > 0;
+
+                if not_empty {
+                    reply.error(ENOTEMPTY);
+                    return;
+                }
+
+                self.files_data.remove(&dir_ino);
+                self.files.remove(&dir_ino);
+            }
+        }
+
+        reply.ok();
     }
 
     fn readdir(
@@ -271,11 +274,13 @@ impl Filesystem for FuseFS {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        dbg!("READDIR", ino);
         let mut entries = vec![(ino, fuser_FileType::Directory, "..")];
+        if ino != 1 {
+            entries.push((ino, fuser_FileType::Directory, "."));
+        }
 
         self.files.iter().for_each(|(ino_child, info)| {
-            if info.parent.is_some() && info.parent.unwrap() == ino || ino == 1 {
+            if info.parent.is_some() && info.parent.unwrap() == ino {
                 entries.push((*ino_child, info.kind, info.name.as_str()));
             }
         });
@@ -290,8 +295,6 @@ impl Filesystem for FuseFS {
 
     // Misc
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
-        // dbg!("GETATTR", ino);
-
         let fileinfo = self.files.get(&ino).unwrap();
 
         reply.attr(&TTL, &fileinfo.attr);
@@ -315,9 +318,7 @@ impl Filesystem for FuseFS {
         flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
-        dbg!("SETATTR", ino);
-
-        let mut fileinfo = self.files.get_mut(&ino).unwrap();
+        let fileinfo = self.files.get_mut(&ino).unwrap();
 
         fileinfo.attr.size = size.unwrap_or(fileinfo.attr.size);
         fileinfo.attr.uid = uid.unwrap_or(fileinfo.attr.uid);
@@ -338,17 +339,17 @@ fn create_attr(ino: Ino, uid: u32, gid: u32, kind: fuser_FileType) -> FileAttr {
 
     FileAttr {
         ino,
+        kind,
+        perm,
+        uid,
+        gid,
         size: 0,
         blocks: 0,
         atime: SystemTime::now(),
         mtime: SystemTime::now(),
         ctime: SystemTime::now(),
         crtime: SystemTime::now(),
-        kind,
-        perm,
         nlink: 1,
-        uid,
-        gid,
         rdev: 0,
         flags: 0,
         blksize: 512,
