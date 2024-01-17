@@ -1,4 +1,5 @@
 mod fuse;
+mod store;
 
 use crate::fuse::FuseFS;
 use fuser::MountOption;

@@ -6,6 +6,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::store::memory_store::MemoryStore;
+use crate::store::store::Store;
+
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_DIR_ATTR: FileAttr = FileAttr {
     ino: 1,
@@ -26,6 +29,7 @@ const ROOT_DIR_ATTR: FileAttr = FileAttr {
 };
 
 pub struct FuseFS {
+    store: Box<dyn Store>,
     pub root_path: String,
     ino_counter: Ino,
     files: HashMap<Ino, FileInfo>,
@@ -46,6 +50,7 @@ impl FuseFS {
     pub fn new(root_path: String) -> Self {
         let mut fs = Self {
             root_path: root_path.clone(),
+            store: Box::new(MemoryStore::new()),
             ino_counter: 1,
             files: HashMap::new(),
             files_data: HashMap::new(),
@@ -74,17 +79,7 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        let file_to_remove = self
-            .files
-            .iter()
-            .find(|(_, info)| info.name == name.to_str().unwrap());
-
-        if let Some((&ino, info)) = file_to_remove {
-            if info.kind == fuser_FileType::RegularFile {
-                self.files_data.remove(&ino);
-                self.files.remove(&ino);
-            }
-        }
+        let res = self.store.delete_file(name.to_str().unwrap().to_owned());
 
         reply.ok();
     }
@@ -101,23 +96,13 @@ impl Filesystem for FuseFS {
         lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        let is_append = offset > 0;
+        let written = self.store.write_data(ino, data, offset).unwrap();
 
-        let filedata = self.files_data.get_mut(&ino).unwrap();
-        if is_append {
-            filedata.extend_from_slice(data);
-        } else {
-            filedata.clone_from(&data.to_vec());
-        }
-
-        let fileinfo = self.files.get_mut(&ino).unwrap();
-        fileinfo.attr.size = filedata.len() as u64;
-
-        reply.written(data.len() as u32);
+        reply.written(written);
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        let ino = self.files.keys().find(|&i| ino == *i);
+        let ino = self.store.open_file(ino);
 
         match ino {
             Some(ino) => {
@@ -141,18 +126,9 @@ impl Filesystem for FuseFS {
         lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        let filedata = self.files_data.get(&ino).unwrap();
+        let data = self.store.read_data(ino, offset, size).unwrap();
 
-        let start = offset as usize;
-        let end = if start + size as usize > filedata.len() {
-            filedata.len()
-        } else {
-            start + size as usize
-        };
-
-        let data = &filedata[start..end];
-
-        reply.data(data);
+        reply.data(&data);
     }
 
     fn create(
@@ -165,20 +141,15 @@ impl Filesystem for FuseFS {
         flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        self.ino_counter += 1;
-
-        let ino = self.ino_counter;
-        let attr = create_attr(ino, _req.uid(), _req.gid(), fuser_FileType::RegularFile);
-
-        let new_fileinfo = FileInfo {
-            attr,
-            parent: Some(parent),
-            kind: fuser_FileType::RegularFile,
-            name: name.to_str().unwrap().to_owned(),
-        };
-
-        self.files.insert(ino, new_fileinfo);
-        self.files_data.insert(ino, vec![]);
+        let attr = self
+            .store
+            .create_file(
+                name.to_str().unwrap().to_owned(),
+                parent,
+                _req.uid(),
+                _req.gid(),
+            )
+            .unwrap();
 
         reply.created(&TTL, &attr, 0, 0, 0);
     }
