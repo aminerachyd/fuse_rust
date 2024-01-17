@@ -29,7 +29,7 @@ const DIR_ATTR_INO1: FileAttr = FileAttr {
 
 pub struct FuseFS {
     pub root_path: String,
-    ino_counter: u64,
+    ino_counter: Ino,
     files: HashMap<Ino, FileInfo>,
     files_data: HashMap<Ino, Vec<u8>>,
 }
@@ -38,7 +38,7 @@ type Ino = u64;
 
 struct FileInfo {
     parent: Option<Ino>,
-    path: String,
+    name: String,
     kind: fuser_FileType,
     attr: FileAttr,
 }
@@ -55,7 +55,7 @@ impl FuseFS {
         fs.files.insert(
             1,
             FileInfo {
-                path: ".".to_owned(),
+                name: ".".to_owned(),
                 kind: fuser_FileType::Directory,
                 attr: DIR_ATTR_INO1,
                 parent: None,
@@ -89,6 +89,17 @@ impl Filesystem for FuseFS {
         reply: fuser::ReplyEmpty,
     ) {
         dbg!("UNLINK");
+        let f = self
+            .files
+            .iter()
+            .find(|(_, info)| info.name == name.to_str().unwrap());
+
+        if let Some((&ino, _)) = f {
+            self.files_data.remove(&ino);
+            self.files.remove(&ino);
+        }
+
+        reply.ok();
     }
 
     fn write(
@@ -181,7 +192,7 @@ impl Filesystem for FuseFS {
             attr,
             parent: Some(parent),
             kind: fuser_FileType::RegularFile,
-            path: name.to_str().unwrap().to_owned(),
+            name: name.to_str().unwrap().to_owned(),
         };
 
         self.files.insert(ino, new_fileinfo);
@@ -203,7 +214,7 @@ impl Filesystem for FuseFS {
         let file = self.files.iter().find(|(_, info)| {
             info.parent.is_some()
                 && info.parent.unwrap() == parent
-                && info.path == name.to_str().unwrap()
+                && info.name == name.to_str().unwrap()
         });
 
         match file {
@@ -234,7 +245,7 @@ impl Filesystem for FuseFS {
             attr,
             parent: Some(parent),
             kind: fuser_FileType::Directory,
-            path: name.to_str().unwrap().to_owned(),
+            name: name.to_str().unwrap().to_owned(),
         };
 
         self.files.insert(ino, new_fileinfo);
@@ -265,7 +276,7 @@ impl Filesystem for FuseFS {
 
         self.files.iter().for_each(|(ino_child, info)| {
             if info.parent.is_some() && info.parent.unwrap() == ino || ino == 1 {
-                entries.push((*ino_child, info.kind, info.path.as_str()));
+                entries.push((*ino_child, info.kind, info.name.as_str()));
             }
         });
 
