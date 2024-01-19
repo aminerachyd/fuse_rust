@@ -1,9 +1,18 @@
+use fuser::{FileAttr, FileType};
 use std::io;
 
-use fuser::FileAttr;
-
 type Ino = u64;
+
+pub struct FileInfo {
+    pub parent: Option<Ino>,
+    pub name: String,
+    pub kind: FileType,
+    pub attr: FileAttr,
+}
+
+// Simplified interface to provide storage for files and directories
 pub trait Store {
+    type Ino;
     fn new() -> Self
     where
         Self: Sized;
@@ -21,6 +30,20 @@ pub trait Store {
         gid: u32,
     ) -> io::Result<FileAttr>;
 
-    // // Dirs
-    // fn dir_info(&self, name: String, parent: Ino) -> Option<FileInfo>;
+    // Dirs
+    fn lookup_file(&self, name: String, parent: Ino) -> Option<(&Ino, &FileInfo)>;
+    fn create_dir(&mut self, name: String, parent: Ino, uid: u32, gid: u32)
+        -> io::Result<FileAttr>;
+    fn delete_dir(&mut self, name: String) -> io::Result<()>;
+    fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, &str)>;
+
+    // Misc
+    fn get_file_attr(&self, ino: Ino) -> Option<&FileAttr>;
+    fn set_file_attr(
+        &mut self,
+        ino: Ino,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+    ) -> Option<&FileAttr>;
 }

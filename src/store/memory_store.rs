@@ -1,13 +1,12 @@
-use fuser::FileType as fuser_FileType;
-use fuser::{consts::FOPEN_KEEP_CACHE, FileAttr, Filesystem};
-use libc::{ENOENT, ENOTEMPTY};
-use std::io;
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-
+use super::store::FileInfo;
 use super::store::Store;
+use fuser::FileAttr;
+use fuser::FileType;
+use libc::ENOTEMPTY;
+use std::io;
+use std::{collections::HashMap, time::SystemTime};
+
+type Ino = <MemoryStore as Store>::Ino;
 
 pub struct MemoryStore {
     ino_counter: Ino,
@@ -16,19 +15,50 @@ pub struct MemoryStore {
 }
 
 impl Store for MemoryStore {
+    type Ino = u64;
     fn new() -> Self {
-        Self {
+        let mut store = Self {
             ino_counter: 1,
             files: HashMap::new(),
             files_data: HashMap::new(),
-        }
+        };
+
+        let root_dir_attr = FileAttr {
+            ino: 1,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: FileType::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        };
+
+        store.files.insert(
+            1,
+            FileInfo {
+                name: ".".to_owned(),
+                kind: FileType::Directory,
+                attr: root_dir_attr,
+                parent: Some(1),
+            },
+        );
+
+        return store;
     }
 
     fn delete_file(&mut self, name: String) -> io::Result<()> {
         let file_to_remove = self.files.iter().find(|(_, info)| info.name == name);
 
         if let Some((&ino, info)) = file_to_remove {
-            if info.kind == fuser_FileType::RegularFile {
+            if info.kind == FileType::RegularFile {
                 self.files_data.remove(&ino);
                 self.files.remove(&ino);
             }
@@ -80,13 +110,13 @@ impl Store for MemoryStore {
         self.ino_counter += 1;
 
         let ino = self.ino_counter;
-        let attr = create_attr(ino, uid, gid, fuser_FileType::RegularFile);
+        let attr = create_attr(ino, uid, gid, FileType::RegularFile);
 
         let new_fileinfo = FileInfo {
             attr,
             name,
             parent: Some(parent),
-            kind: fuser_FileType::RegularFile,
+            kind: FileType::RegularFile,
         };
 
         self.files.insert(ino, new_fileinfo);
@@ -94,49 +124,111 @@ impl Store for MemoryStore {
 
         Ok(attr)
     }
+
+    // Dirs
+    fn lookup_file(&self, name: String, parent: Ino) -> Option<(&u64, &FileInfo)> {
+        self.files.iter().find(|(_, info)| {
+            info.parent.is_some() && info.parent.unwrap() == parent && info.name == name
+        })
+    }
+
+    fn create_dir(
+        &mut self,
+        name: String,
+        parent: Ino,
+        uid: u32,
+        gid: u32,
+    ) -> io::Result<FileAttr> {
+        self.ino_counter += 1;
+        let ino = self.ino_counter;
+        let attr = create_attr(ino, uid, gid, FileType::Directory);
+        let new_fileinfo = FileInfo {
+            attr,
+            name,
+            parent: Some(parent),
+            kind: FileType::Directory,
+        };
+
+        self.files.insert(ino, new_fileinfo);
+        Ok(attr)
+    }
+
+    fn delete_dir(&mut self, name: String) -> io::Result<()> {
+        let dir_to_remove = self.files.iter().find(|(_, info)| info.name == name);
+
+        if let Some((&dir_ino, info)) = dir_to_remove {
+            if info.kind == FileType::Directory {
+                let not_empty = self
+                    .files
+                    .iter()
+                    .filter(|(_, info)| info.parent.is_some() && info.parent.unwrap() == dir_ino)
+                    .map(|(ino, _)| *ino)
+                    .count()
+                    > 0;
+
+                if not_empty {
+                    return Err(io::Error::from_raw_os_error(ENOTEMPTY));
+                }
+
+                self.files_data.remove(&dir_ino);
+                self.files.remove(&dir_ino);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, &str)> {
+        let mut entries = vec![(ino, FileType::Directory, "..")];
+        if ino != 1 {
+            entries.push((ino, FileType::Directory, "."));
+        }
+
+        self.files.iter().for_each(|(ino_child, info)| {
+            if info.parent.is_some() && info.parent.unwrap() == ino {
+                entries.push((*ino_child, info.kind, info.name.as_str()));
+            }
+        });
+
+        return entries;
+    }
+
+    // Misc
+    fn get_file_attr(&self, ino: Ino) -> Option<&FileAttr> {
+        let file = self.files.get(&ino);
+        match file {
+            Some(fileinfo) => Some(&fileinfo.attr),
+            None => None,
+        }
+    }
+
+    fn set_file_attr(
+        &mut self,
+        ino: Ino,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+    ) -> Option<&FileAttr> {
+        let file = self.files.get_mut(&ino);
+        match file {
+            Some(fileinfo) => {
+                fileinfo.attr.size = size.unwrap_or(fileinfo.attr.size);
+                fileinfo.attr.uid = uid.unwrap_or(fileinfo.attr.uid);
+                fileinfo.attr.gid = gid.unwrap_or(fileinfo.attr.gid);
+                fileinfo.attr.atime = SystemTime::now();
+                fileinfo.attr.mtime = SystemTime::now();
+                fileinfo.attr.ctime = SystemTime::now();
+
+                Some(&fileinfo.attr)
+            }
+            None => None,
+        }
+    }
 }
 
-// #### TO REFACTOR
-
-const TTL: Duration = Duration::from_secs(1);
-const ROOT_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: UNIX_EPOCH,
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: fuser_FileType::Directory,
-    perm: 0o755,
-    nlink: 2,
-    uid: 0,
-    gid: 0,
-    rdev: 0,
-    flags: 0,
-    blksize: 512,
-};
-
-pub struct FuseFS {
-    pub root_path: String,
-    ino_counter: Ino,
-    files: HashMap<Ino, FileInfo>,
-    files_data: HashMap<Ino, Vec<u8>>,
-}
-
-type Ino = u64;
-
-#[derive(Debug)]
-struct FileInfo {
-    parent: Option<Ino>,
-    name: String,
-    kind: fuser_FileType,
-    attr: FileAttr,
-}
-
-fn create_attr(ino: Ino, uid: u32, gid: u32, kind: fuser_FileType) -> FileAttr {
+fn create_attr(ino: Ino, uid: u32, gid: u32, kind: FileType) -> FileAttr {
     let mut perm = 0o644;
-    if kind == fuser_FileType::Directory {
+    if kind == FileType::Directory {
         perm = 0o755;
     }
 
