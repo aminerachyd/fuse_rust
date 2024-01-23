@@ -16,8 +16,8 @@ pub struct MemoryStore {
 
 impl Store for MemoryStore {
     type Ino = u64;
-    fn new() -> Self {
-        let mut store = Self {
+    fn new() -> io::Result<Self> {
+        let mut store = MemoryStore {
             ino_counter: 1,
             files: HashMap::new(),
             files_data: HashMap::new(),
@@ -51,7 +51,7 @@ impl Store for MemoryStore {
             },
         );
 
-        return store;
+        return Ok(store);
     }
 
     fn delete_file(&mut self, name: String) -> io::Result<()> {

@@ -1,5 +1,4 @@
-use crate::store::memory_store::MemoryStore;
-use crate::store::store::Store;
+use crate::store::{memory_store::MemoryStore, store::Store};
 use fuser::{consts::FOPEN_KEEP_CACHE, Filesystem};
 use libc::ENOENT;
 use std::time::{Duration, SystemTime};
@@ -8,15 +7,15 @@ const TTL: Duration = Duration::from_secs(1);
 
 pub struct FuseFS {
     store: Box<dyn Store<Ino = u64>>,
-    pub root_path: String,
 }
 
 impl FuseFS {
-    pub fn new(root_path: String) -> Self {
-        Self {
-            root_path: root_path.clone(),
-            store: Box::new(MemoryStore::new()),
-        }
+    pub fn new() -> Self {
+        let store = MemoryStore::new().unwrap();
+
+        return Self {
+            store: Box::new(store),
+        };
     }
 }
 

@@ -12,8 +12,9 @@ pub struct FileInfo {
 
 // Simplified interface to provide storage for files and directories
 pub trait Store {
-    type Ino;
-    fn new() -> Self
+    type Ino: 'static;
+
+    fn new() -> io::Result<Self>
     where
         Self: Sized;
 
@@ -34,6 +35,7 @@ pub trait Store {
     fn lookup_file(&self, name: String, parent: Ino) -> Option<(&Ino, &FileInfo)>;
     fn create_dir(&mut self, name: String, parent: Ino, uid: u32, gid: u32)
         -> io::Result<FileAttr>;
+
     fn delete_dir(&mut self, name: String) -> io::Result<()>;
     fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, &str)>;
 
