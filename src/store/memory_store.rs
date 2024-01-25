@@ -83,8 +83,12 @@ impl Store for MemoryStore {
         Ok(data.len() as u32)
     }
 
-    fn open_file(&self, ino: Ino) -> Option<&Ino> {
-        self.files.keys().find(|&i| ino == *i)
+    fn open_file(&self, ino: Ino) -> Option<Ino> {
+        let res = self.files.keys().find(|&i| ino == *i);
+        match res {
+            Some(_) => Some(ino),
+            None => None,
+        }
     }
 
     fn read_data(&self, ino: Ino, offset: i64, size: u32) -> io::Result<Vec<u8>> {
@@ -126,10 +130,15 @@ impl Store for MemoryStore {
     }
 
     // Dirs
-    fn lookup_file(&self, name: String, parent: Ino) -> Option<(&u64, &FileInfo)> {
-        self.files.iter().find(|(_, info)| {
+    fn lookup_file(&self, name: String, parent: Ino) -> Option<(u64, FileInfo)> {
+        let res = self.files.iter().find(|(_, info)| {
             info.parent.is_some() && info.parent.unwrap() == parent && info.name == name
-        })
+        });
+
+        match res {
+            Some((&ino, info)) => Some((ino, info.clone())),
+            None => None,
+        }
     }
 
     fn create_dir(
@@ -178,15 +187,15 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, &str)> {
-        let mut entries = vec![(ino, FileType::Directory, "..")];
+    fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, String)> {
+        let mut entries = vec![(ino, FileType::Directory, "..".to_string())];
         if ino != 1 {
-            entries.push((ino, FileType::Directory, "."));
+            entries.push((ino, FileType::Directory, ".".to_string()));
         }
 
         self.files.iter().for_each(|(ino_child, info)| {
             if info.parent.is_some() && info.parent.unwrap() == ino {
-                entries.push((*ino_child, info.kind, info.name.as_str()));
+                entries.push((*ino_child, info.kind, info.name.to_string()));
             }
         });
 
@@ -194,10 +203,10 @@ impl Store for MemoryStore {
     }
 
     // Misc
-    fn get_file_attr(&self, ino: Ino) -> Option<&FileAttr> {
+    fn get_file_attr(&self, ino: Ino) -> Option<FileAttr> {
         let file = self.files.get(&ino);
         match file {
-            Some(fileinfo) => Some(&fileinfo.attr),
+            Some(fileinfo) => Some(fileinfo.attr),
             None => None,
         }
     }
@@ -208,7 +217,7 @@ impl Store for MemoryStore {
         uid: Option<u32>,
         gid: Option<u32>,
         size: Option<u64>,
-    ) -> Option<&FileAttr> {
+    ) -> Option<FileAttr> {
         let file = self.files.get_mut(&ino);
         match file {
             Some(fileinfo) => {
@@ -219,7 +228,7 @@ impl Store for MemoryStore {
                 fileinfo.attr.mtime = SystemTime::now();
                 fileinfo.attr.ctime = SystemTime::now();
 
-                Some(&fileinfo.attr)
+                Some(fileinfo.attr)
             }
             None => None,
         }

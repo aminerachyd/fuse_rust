@@ -1,7 +1,9 @@
-use super::store::Store;
+use super::store::{FileInfo, Store};
 use etcd_client::Client;
 use fuser::{FileAttr, FileType};
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env,
     io::{self, ErrorKind},
     sync::mpsc,
@@ -13,10 +15,15 @@ type Ino = u64;
 pub struct EtcdStore {
     ino_count: Ino,
     client: Client,
+    dirs: HashMap<Ino, Vec<Ino>>,
+    ino_to_name: HashMap<Ino, String>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct FileData {
+    name: String,
     attr: FileAttr,
+    parent: Option<Ino>,
     data: Vec<u8>,
 }
 
@@ -28,7 +35,7 @@ impl Store for EtcdStore {
 
         let (tx, rx) = mpsc::channel();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let client = Client::connect([endpoint], None)
                 .await
                 .expect("Couldn't connect to server");
@@ -36,16 +43,23 @@ impl Store for EtcdStore {
             let _ = tx.send(client);
         });
 
+        let client = rx.recv().unwrap();
+        println!("Connected to Etcd");
+        let mut dirs = HashMap::new();
+        dirs.insert(1, vec![]);
+
         return Ok(EtcdStore {
+            dirs,
+            client,
             ino_count: 0,
-            client: rx.recv().unwrap(),
+            ino_to_name: HashMap::new(),
         });
     }
 
     fn create_file(
         &mut self,
         name: String,
-        _parent: Ino,
+        parent: Ino,
         uid: u32,
         gid: u32,
     ) -> io::Result<fuser::FileAttr> {
@@ -53,14 +67,249 @@ impl Store for EtcdStore {
 
         let new_ino = self.ino_count;
 
-        let file_name = format!("{}#{}", new_ino, name);
         let file_attr = create_attr(new_ino, uid, gid, FileType::RegularFile);
+        let file_data = FileData {
+            name: name.clone(),
+            attr: file_attr.clone(),
+            parent: Some(parent),
+            data: vec![],
+        };
 
         let (tx, rx) = mpsc::channel();
         let mut client = self.client.clone();
 
         tokio::spawn(async move {
-            let res = client.put(file_name, vec![], None).await;
+            let payload = serde_yaml::to_string(&file_data).unwrap();
+            let res = client.put(new_ino.to_string(), payload, None).await;
+
+            match res {
+                Ok(_) => tx.send(Ok(())),
+                Err(_) => tx.send(Err(())),
+            }
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(_) => {
+                self.ino_to_name.insert(new_ino, name);
+                self.dirs.get_mut(&parent).unwrap().push(new_ino);
+                return Ok(file_attr);
+            }
+            Err(_) => Err(ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn delete_file(&mut self, name: String) -> io::Result<()> {
+        let file_ino = self.ino_to_name.iter().find(|(_, n)| **n == name);
+
+        if let Some((&ino, _)) = file_ino {
+            let (tx, rx) = mpsc::channel();
+            let mut client = self.client.clone();
+
+            tokio::spawn(async move {
+                let res = client.delete(name, None).await;
+
+                match res {
+                    Ok(_) => tx.send(Ok(())),
+                    Err(_) => tx.send(Err(())),
+                }
+            });
+
+            let res = rx.recv();
+            match res {
+                Ok(_) => {
+                    self.ino_to_name.remove(&ino);
+                    self.dirs.iter_mut().for_each(|(_, v)| {
+                        let index_to_remove = v.iter().find(|&i| *i == ino);
+                        if let Some(index) = index_to_remove {
+                            v.remove(*index as usize);
+                        }
+                    });
+                    return Ok(());
+                }
+                Err(_) => Err(ErrorKind::BrokenPipe.into()),
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    fn lookup_file(&self, name: String, parent: Ino) -> Option<(Ino, FileInfo)> {
+        let file_ino = self.ino_to_name.iter().find(|(_, n)| *n == &name);
+        match file_ino {
+            Some((&ino, _)) => {
+                let (tx, rx) = mpsc::channel();
+                let mut client = self.client.clone();
+
+                tokio::spawn(async move {
+                    let res = client.get(ino.to_string(), None).await;
+
+                    match res {
+                        Ok(res) => {
+                            res.kvs().iter().for_each(|kv| {
+                                let ino = kv.key_str().unwrap();
+                                let file_data = kv.value_str().unwrap();
+
+                                let file_data =
+                                    serde_yaml::from_str::<FileData>(file_data).unwrap();
+
+                                let file_info = super::store::FileInfo {
+                                    attr: file_data.attr,
+                                    name: file_data.name,
+                                    parent: Some(parent),
+                                    kind: FileType::RegularFile,
+                                };
+
+                                tx.send(Some((ino.parse::<Ino>().unwrap(), file_info)));
+                            });
+                        }
+                        Err(_) => {
+                            tx.send(None);
+                        }
+                    }
+                });
+
+                return rx.recv().unwrap();
+            }
+            None => None,
+        }
+    }
+
+    fn read_data(&self, ino: Ino, offset: i64, size: u32) -> io::Result<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let res = client.get(ino.to_string(), None).await;
+
+            match res {
+                Ok(res) => {
+                    res.kvs().iter().for_each(|kv| {
+                        let value = kv.value_str().unwrap();
+                        let file_data: FileData = serde_yaml::from_str(value).unwrap();
+
+                        let data = file_data.data;
+                        let data_len = data.len() as i64;
+
+                        let start = offset as usize;
+                        let end = (offset + size as i64) as usize;
+
+                        let data = if end > data_len as usize {
+                            data[start..].to_vec()
+                        } else {
+                            data[start..end].to_vec()
+                        };
+
+                        tx.send(Ok(data));
+                    });
+                }
+                Err(_) => {
+                    tx.send(Err(ErrorKind::NotFound.into()));
+                }
+            }
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(res) => res,
+            Err(_) => Err(ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn write_data(&mut self, ino: Ino, data: &[u8], offset: i64) -> io::Result<u32> {
+        let data = data.to_vec();
+        let len = data.len();
+        let (tx, rx) = mpsc::channel::<io::Result<()>>();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let res = client.get(ino.to_string(), None).await;
+
+            match res {
+                Ok(res) => {
+                    for kv in res.kvs().iter() {
+                        let value = kv.value_str().unwrap();
+                        let mut file_data: FileData = serde_yaml::from_str(value).unwrap();
+
+                        let data_len = file_data.data.len() as i64;
+                        let offset = offset as usize;
+
+                        if offset > data_len as usize {
+                            let mut new_data = vec![0; offset - data_len as usize];
+                            new_data.extend_from_slice(&data[..]);
+                            file_data.data = new_data;
+                        } else {
+                            let mut new_data = file_data.data[..offset].to_vec();
+                            new_data.extend_from_slice(&data[..]);
+                            file_data.data = new_data;
+                        }
+
+                        let payload = serde_yaml::to_string(&file_data).unwrap();
+                        let res = client.put(ino.to_string(), payload, None).await;
+
+                        match res {
+                            Ok(_) => tx.send(Ok(())),
+                            Err(_) => tx.send(Err(ErrorKind::BrokenPipe.into())),
+                        };
+                    }
+                }
+                Err(_) => {
+                    tx.send(Err(ErrorKind::NotFound.into()));
+                }
+            }
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(_) => Ok(len as u32),
+            Err(_) => Err(ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn open_file(&self, ino: Ino) -> Option<Ino> {
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let res = client.get(ino.to_string(), None).await;
+
+            match res {
+                Ok(res) => {
+                    tx.send(Some(ino));
+                }
+                Err(_) => {
+                    tx.send(None);
+                }
+            }
+        });
+
+        rx.recv().unwrap()
+    }
+
+    fn create_dir(
+        &mut self,
+        name: String,
+        parent: Ino,
+        uid: u32,
+        gid: u32,
+    ) -> io::Result<FileAttr> {
+        self.ino_count += 1;
+        let new_ino = self.ino_count;
+
+        let file_attr = create_attr(new_ino, uid, gid, FileType::Directory);
+        let file_data = FileData {
+            name,
+            attr: file_attr.clone(),
+            parent: Some(parent),
+            data: vec![],
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let payload = serde_yaml::to_string(&file_data).unwrap();
+            let res = client.put(new_ino.to_string(), payload, None).await;
 
             match res {
                 Ok(_) => tx.send(Ok(())),
@@ -72,6 +321,176 @@ impl Store for EtcdStore {
         match res {
             Ok(_) => Ok(file_attr),
             Err(_) => Err(ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, String)> {
+        let mut entries = vec![(ino, FileType::Directory, "..")];
+        if ino != 1 {
+            entries.push((ino, FileType::Directory, "."));
+        }
+        let child_inos = self.dirs.get(&ino).unwrap().clone();
+
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let mut result = vec![];
+            for ino in child_inos.iter() {
+                let res = client.get(ino.to_string(), None).await;
+
+                match res {
+                    Ok(res) => res.kvs().iter().for_each(|kv| {
+                        let data = kv.value_str().unwrap();
+                        let file_data = serde_yaml::from_str::<FileData>(data).unwrap();
+
+                        let name = file_data.name;
+                        let ino = file_data.attr.ino;
+                        let file_type = file_data.attr.kind;
+
+                        result.push((ino, file_type, name));
+                    }),
+                    Err(_) => {}
+                }
+            }
+
+            tx.send(result);
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(res) => res,
+            Err(_) => vec![],
+        }
+    }
+
+    fn get_file_attr(&self, ino: Ino) -> Option<FileAttr> {
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let res = client.get(ino.to_string(), None).await;
+
+            match res {
+                Ok(res) => {
+                    res.kvs().iter().for_each(|kv| {
+                        let data = kv.value_str().unwrap();
+                        let file_data = serde_yaml::from_str::<FileData>(data).unwrap();
+                        let attr = file_data.attr.clone();
+
+                        tx.send(Some(attr));
+                    });
+                }
+                Err(_) => {
+                    tx.send(None);
+                }
+            }
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(res) => res,
+            Err(_) => None,
+        }
+    }
+
+    fn delete_dir(&mut self, name: String) -> io::Result<()> {
+        let file_ino = self.ino_to_name.iter().find(|(_, n)| **n == name);
+
+        if let Some((&dir_ino, _)) = file_ino {
+            let child_inos = self.dirs.get(&dir_ino).unwrap().clone();
+
+            let (tx, rx) = mpsc::channel::<io::Result<()>>();
+            let mut client = self.client.clone();
+
+            tokio::spawn(async move {
+                let inos_to_delete: Vec<String> = child_inos
+                    .iter()
+                    .chain(Some(&dir_ino))
+                    .map(|i| i.to_string())
+                    .collect();
+
+                for ino in inos_to_delete.iter() {
+                    client.delete(ino.to_owned(), None).await;
+                }
+
+                tx.send(Ok(()));
+            });
+
+            let res = rx.recv();
+            match res {
+                Ok(_) => {
+                    self.ino_to_name.remove(&dir_ino);
+                    self.dirs.iter_mut().for_each(|(_, v)| {
+                        let index_to_remove = v.iter().find(|&i| *i == dir_ino);
+                        if let Some(index) = index_to_remove {
+                            v.remove(*index as usize);
+                        }
+                    });
+                    return Ok(());
+                }
+                Err(_) => Err(ErrorKind::BrokenPipe.into()),
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    fn set_file_attr(
+        &mut self,
+        ino: Ino,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+    ) -> Option<FileAttr> {
+        let (tx, rx) = mpsc::channel();
+        let mut client = self.client.clone();
+
+        tokio::spawn(async move {
+            let res = client.get(ino.to_string(), None).await;
+
+            match res {
+                Ok(res) => {
+                    for kv in res.kvs().iter() {
+                        let value = kv.value_str().unwrap();
+                        let mut file_data: FileData = serde_yaml::from_str(value).unwrap();
+
+                        if let Some(uid) = uid {
+                            file_data.attr.uid = uid;
+                        }
+
+                        if let Some(gid) = gid {
+                            file_data.attr.gid = gid;
+                        }
+
+                        if let Some(size) = size {
+                            file_data.attr.size = size;
+                        }
+
+                        let payload = serde_yaml::to_string(&file_data).unwrap();
+                        let res = client.put(ino.to_string(), payload, None).await;
+
+                        match res {
+                            Ok(_) => {
+                                let attr = file_data.attr.clone();
+                                tx.send(Some(attr));
+                            }
+                            Err(_) => {
+                                tx.send(None);
+                            }
+                        };
+                    }
+                }
+                Err(_) => {
+                    tx.send(None);
+                }
+            }
+        });
+
+        let res = rx.recv();
+        match res {
+            Ok(res) => res,
+            Err(_) => None,
         }
     }
 }

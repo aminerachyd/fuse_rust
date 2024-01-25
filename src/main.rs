@@ -5,7 +5,8 @@ use fuse::FuseFS;
 use fuser::MountOption;
 use std::{fs, io};
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let mountpoint = "/tmp/fusefs";
     let passthrough_fs = FuseFS::new();
 

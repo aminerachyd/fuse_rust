@@ -1,4 +1,4 @@
-use crate::store::{memory_store::MemoryStore, store::Store};
+use crate::store::{etcd_store::EtcdStore, memory_store::MemoryStore, store::Store};
 use fuser::{consts::FOPEN_KEEP_CACHE, Filesystem};
 use libc::ENOENT;
 use std::time::{Duration, SystemTime};
@@ -12,6 +12,7 @@ pub struct FuseFS {
 impl FuseFS {
     pub fn new() -> Self {
         let store = MemoryStore::new().unwrap();
+        // let store = EtcdStore::new().unwrap();
 
         return Self {
             store: Box::new(store),
@@ -56,7 +57,7 @@ impl Filesystem for FuseFS {
         match ino {
             Some(ino) => {
                 let flags = FOPEN_KEEP_CACHE;
-                reply.opened(*ino, flags);
+                reply.opened(ino, flags);
             }
             None => {
                 reply.error(ENOENT);
@@ -184,7 +185,7 @@ impl Filesystem for FuseFS {
         let attr = self.store.get_file_attr(ino);
 
         match attr {
-            Some(attr) => reply.attr(&TTL, attr),
+            Some(attr) => reply.attr(&TTL, &attr),
             None => reply.error(ENOENT),
         }
     }
@@ -210,7 +211,7 @@ impl Filesystem for FuseFS {
         let attr = self.store.set_file_attr(ino, uid, gid, size);
 
         match attr {
-            Some(attr) => reply.attr(&TTL, attr),
+            Some(attr) => reply.attr(&TTL, &attr),
             None => reply.error(ENOENT),
         }
     }
