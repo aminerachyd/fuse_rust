@@ -4,7 +4,6 @@ use fuser::{FileAttr, FileType};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    env,
     io::{self, ErrorKind},
     sync::mpsc,
     time::SystemTime,
@@ -19,7 +18,7 @@ pub struct EtcdStore {
     ino_to_name: HashMap<Ino, String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct FileData {
     name: String,
     attr: FileAttr,
@@ -31,29 +30,82 @@ impl Store for EtcdStore {
     type Ino = Ino;
 
     fn new() -> io::Result<Self> {
-        let endpoint = env::var("ETCD_ENDPOINT").expect("Expected Etcd endpoint");
+        // let endpoint = env::var("ETCD_ENDPOINT").expect("Expected Etcd endpoint");
+        let endpoint = "localhost:2379";
 
         let (tx, rx) = mpsc::channel();
-
-        let handle = tokio::spawn(async move {
-            let client = Client::connect([endpoint], None)
+        tokio::spawn(async move {
+            println!("Connecting to Etcd on endpoint {}", endpoint);
+            let mut client = Client::connect([endpoint], None)
                 .await
                 .expect("Couldn't connect to server");
 
-            let _ = tx.send(client);
+            let res = client.member_list().await;
+            match res {
+                Ok(res) => {
+                    println!("Connected to Etcd, members list:");
+                    res.members().iter().for_each(|m| {
+                        println!("Etcd member: {:?}", m);
+                    });
+
+                    let root_dir_attr = FileAttr {
+                        ino: 1,
+                        size: 0,
+                        blocks: 0,
+                        atime: SystemTime::now(),
+                        mtime: SystemTime::now(),
+                        ctime: SystemTime::now(),
+                        crtime: SystemTime::now(),
+                        kind: FileType::Directory,
+                        perm: 0o755,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        flags: 0,
+                        blksize: 512,
+                    };
+                    let root_dir = FileData {
+                        name: ".".to_owned(),
+                        attr: root_dir_attr,
+                        parent: None,
+                        data: vec![],
+                    };
+                    let str_root_dir = serde_yaml::to_string(&root_dir).unwrap();
+                    let res = client.put("1", str_root_dir, None).await;
+                    match res {
+                        Ok(_) => {
+                            let _ = tx.send(client);
+                        }
+                        Err(e) => {
+                            panic!("Couldn't create root dir: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Couldn't get Etcd member list: {}", e);
+                }
+            }
         });
 
-        let client = rx.recv().unwrap();
-        println!("Connected to Etcd");
-        let mut dirs = HashMap::new();
-        dirs.insert(1, vec![]);
+        let client = rx.recv();
+        match client {
+            Ok(client) => {
+                let mut dirs = HashMap::new();
+                let mut ino_to_name = HashMap::new();
 
-        return Ok(EtcdStore {
-            dirs,
-            client,
-            ino_count: 0,
-            ino_to_name: HashMap::new(),
-        });
+                dirs.insert(1, vec![]);
+                ino_to_name.insert(1, ".".to_owned());
+
+                return Ok(EtcdStore {
+                    dirs,
+                    client,
+                    ino_to_name,
+                    ino_count: 1,
+                });
+            }
+            Err(_) => return Err(ErrorKind::BrokenPipe.into()),
+        }
     }
 
     fn create_file(
@@ -102,12 +154,12 @@ impl Store for EtcdStore {
     fn delete_file(&mut self, name: String) -> io::Result<()> {
         let file_ino = self.ino_to_name.iter().find(|(_, n)| **n == name);
 
-        if let Some((&ino, _)) = file_ino {
+        if let Some((&file_ino, _)) = file_ino {
             let (tx, rx) = mpsc::channel();
             let mut client = self.client.clone();
 
             tokio::spawn(async move {
-                let res = client.delete(name, None).await;
+                let res = client.delete(file_ino.to_string(), None).await;
 
                 match res {
                     Ok(_) => tx.send(Ok(())),
@@ -118,11 +170,11 @@ impl Store for EtcdStore {
             let res = rx.recv();
             match res {
                 Ok(_) => {
-                    self.ino_to_name.remove(&ino);
+                    self.ino_to_name.remove(&file_ino);
                     self.dirs.iter_mut().for_each(|(_, v)| {
-                        let index_to_remove = v.iter().find(|&i| *i == ino);
-                        if let Some(index) = index_to_remove {
-                            v.remove(*index as usize);
+                        let index_to_remove = v.iter().position(|&i| i == file_ino);
+                        if let Some(index_to_remove) = index_to_remove {
+                            v.remove(index_to_remove);
                         }
                     });
                     return Ok(());
@@ -217,6 +269,10 @@ impl Store for EtcdStore {
     }
 
     fn write_data(&mut self, ino: Ino, data: &[u8], offset: i64) -> io::Result<u32> {
+        let mut is_appending = false;
+        if offset > 0 {
+            is_appending = true;
+        }
         let data = data.to_vec();
         let len = data.len();
         let (tx, rx) = mpsc::channel::<io::Result<()>>();
@@ -227,31 +283,23 @@ impl Store for EtcdStore {
 
             match res {
                 Ok(res) => {
-                    for kv in res.kvs().iter() {
-                        let value = kv.value_str().unwrap();
-                        let mut file_data: FileData = serde_yaml::from_str(value).unwrap();
-
-                        let data_len = file_data.data.len() as i64;
-                        let offset = offset as usize;
-
-                        if offset > data_len as usize {
-                            let mut new_data = vec![0; offset - data_len as usize];
-                            new_data.extend_from_slice(&data[..]);
-                            file_data.data = new_data;
-                        } else {
-                            let mut new_data = file_data.data[..offset].to_vec();
-                            new_data.extend_from_slice(&data[..]);
-                            file_data.data = new_data;
-                        }
-
-                        let payload = serde_yaml::to_string(&file_data).unwrap();
-                        let res = client.put(ino.to_string(), payload, None).await;
-
-                        match res {
-                            Ok(_) => tx.send(Ok(())),
-                            Err(_) => tx.send(Err(ErrorKind::BrokenPipe.into())),
-                        };
+                    let kv = res.kvs().iter().nth(0).unwrap();
+                    let str_file_data = kv.value_str().unwrap();
+                    let mut file_data: FileData = serde_yaml::from_str(str_file_data).unwrap();
+                    if offset > 0 {
+                        file_data.data.extend(data);
+                    } else {
+                        file_data.data = data.to_vec();
                     }
+                    file_data.attr.size = file_data.data.len() as u64;
+
+                    let payload = serde_yaml::to_string(&file_data).unwrap();
+                    let res = client.put(ino.to_string(), payload, None).await;
+
+                    match res {
+                        Ok(_) => tx.send(Ok(())),
+                        Err(_) => tx.send(Err(ErrorKind::BrokenPipe.into())),
+                    };
                 }
                 Err(_) => {
                     tx.send(Err(ErrorKind::NotFound.into()));
@@ -275,6 +323,11 @@ impl Store for EtcdStore {
 
             match res {
                 Ok(res) => {
+                    let bytes_ino = res.kvs().last().unwrap().key();
+                    let ino = String::from_utf8(bytes_ino.to_vec())
+                        .unwrap()
+                        .parse::<Ino>()
+                        .unwrap();
                     tx.send(Some(ino));
                 }
                 Err(_) => {
@@ -298,7 +351,7 @@ impl Store for EtcdStore {
 
         let file_attr = create_attr(new_ino, uid, gid, FileType::Directory);
         let file_data = FileData {
-            name,
+            name: name.clone(),
             attr: file_attr.clone(),
             parent: Some(parent),
             data: vec![],
@@ -319,16 +372,26 @@ impl Store for EtcdStore {
 
         let res = rx.recv();
         match res {
-            Ok(_) => Ok(file_attr),
+            Ok(_) => {
+                self.dirs.insert(new_ino, vec![]);
+                self.dirs
+                    .iter_mut()
+                    .find(|(&i, _)| i == parent)
+                    .unwrap()
+                    .1
+                    .push(new_ino);
+                self.ino_to_name.insert(new_ino, name);
+                return Ok(file_attr);
+            }
             Err(_) => Err(ErrorKind::BrokenPipe.into()),
         }
     }
 
     fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, String)> {
-        let mut entries = vec![(ino, FileType::Directory, "..")];
-        if ino != 1 {
-            entries.push((ino, FileType::Directory, "."));
-        }
+        let mut entries = vec![
+            (ino, FileType::Directory, ".".to_owned()),
+            (ino, FileType::Directory, "..".to_owned()),
+        ];
         let child_inos = self.dirs.get(&ino).unwrap().clone();
 
         let (tx, rx) = mpsc::channel();
@@ -359,7 +422,10 @@ impl Store for EtcdStore {
 
         let res = rx.recv();
         match res {
-            Ok(res) => res,
+            Ok(res) => {
+                entries.extend(res);
+                return entries;
+            }
             Err(_) => vec![],
         }
     }
@@ -422,9 +488,9 @@ impl Store for EtcdStore {
                 Ok(_) => {
                     self.ino_to_name.remove(&dir_ino);
                     self.dirs.iter_mut().for_each(|(_, v)| {
-                        let index_to_remove = v.iter().find(|&i| *i == dir_ino);
-                        if let Some(index) = index_to_remove {
-                            v.remove(*index as usize);
+                        let index_to_remove = v.iter().position(|&i| i == dir_ino);
+                        if let Some(index_to_remove) = index_to_remove {
+                            v.remove(index_to_remove);
                         }
                     });
                     return Ok(());

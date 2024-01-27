@@ -11,8 +11,8 @@ pub struct FuseFS {
 
 impl FuseFS {
     pub fn new() -> Self {
-        let store = MemoryStore::new().unwrap();
-        // let store = EtcdStore::new().unwrap();
+        // let store = MemoryStore::new().unwrap();
+        let store = EtcdStore::new().unwrap();
 
         return Self {
             store: Box::new(store),
@@ -29,6 +29,7 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
+        //dbg!("UNLINK");
         let _res = self.store.delete_file(name.to_str().unwrap().to_owned());
 
         reply.ok();
@@ -46,12 +47,14 @@ impl Filesystem for FuseFS {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
+        //dbg!("WRITE");
         let written = self.store.write_data(ino, data, offset).unwrap();
 
         reply.written(written);
     }
 
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        //dbg!("OPEN");
         let ino = self.store.open_file(ino);
 
         match ino {
@@ -76,6 +79,7 @@ impl Filesystem for FuseFS {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
+        //dbg!("READ");
         let data = self.store.read_data(ino, offset, size).unwrap();
 
         reply.data(&data);
@@ -91,6 +95,7 @@ impl Filesystem for FuseFS {
         _flags: i32,
         reply: fuser::ReplyCreate,
     ) {
+        //dbg!("CREAT");
         let attr = self
             .store
             .create_file(
@@ -112,6 +117,7 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
+        //dbg!("LOOKUP");
         let file = self
             .store
             .lookup_file(name.to_str().unwrap().to_owned(), parent);
@@ -135,6 +141,7 @@ impl Filesystem for FuseFS {
         _umask: u32,
         reply: fuser::ReplyEntry,
     ) {
+        //dbg!("MKDIR");
         let attr = self.store.create_dir(
             name.to_str().unwrap().to_owned(),
             parent,
@@ -155,6 +162,7 @@ impl Filesystem for FuseFS {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
+        //dbg!("RMDIR");
         let res = self.store.delete_dir(name.to_str().unwrap().to_owned());
         match res {
             Ok(_) => reply.ok(),
@@ -170,6 +178,7 @@ impl Filesystem for FuseFS {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
+        //dbg!("READDIR");
         let entries = self.store.get_dir_entries(ino);
 
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
@@ -182,6 +191,7 @@ impl Filesystem for FuseFS {
 
     // Misc
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
+        //dbg!("GETATTR");
         let attr = self.store.get_file_attr(ino);
 
         match attr {
@@ -208,6 +218,7 @@ impl Filesystem for FuseFS {
         _flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
+        //dbg!("SETATTR");
         let attr = self.store.set_file_attr(ino, uid, gid, size);
 
         match attr {
