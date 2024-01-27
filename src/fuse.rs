@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime};
 
 const TTL: Duration = Duration::from_secs(1);
 
+// Filesystem implementation that handles regular files and directories
+// Uses a store with a concise API to handle all filesystem operations
 pub struct FuseFS {
     store: Box<dyn Store<Ino = u64>>,
 }

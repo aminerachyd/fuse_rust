@@ -209,7 +209,6 @@ impl Store for EtcdStore {
                                     attr: file_data.attr,
                                     name: file_data.name,
                                     parent: Some(parent),
-                                    kind: FileType::RegularFile,
                                 };
 
                                 tx.send(Some((ino.parse::<Ino>().unwrap(), file_info)));

@@ -45,7 +45,6 @@ impl Store for MemoryStore {
             1,
             FileInfo {
                 name: ".".to_owned(),
-                kind: FileType::Directory,
                 attr: root_dir_attr,
                 parent: Some(1),
             },
@@ -58,7 +57,7 @@ impl Store for MemoryStore {
         let file_to_remove = self.files.iter().find(|(_, info)| info.name == name);
 
         if let Some((&ino, info)) = file_to_remove {
-            if info.kind == FileType::RegularFile {
+            if info.attr.kind == FileType::RegularFile {
                 self.files_data.remove(&ino);
                 self.files.remove(&ino);
             }
@@ -120,7 +119,6 @@ impl Store for MemoryStore {
             attr,
             name,
             parent: Some(parent),
-            kind: FileType::RegularFile,
         };
 
         self.files.insert(ino, new_fileinfo);
@@ -155,7 +153,6 @@ impl Store for MemoryStore {
             attr,
             name,
             parent: Some(parent),
-            kind: FileType::Directory,
         };
 
         self.files.insert(ino, new_fileinfo);
@@ -166,7 +163,7 @@ impl Store for MemoryStore {
         let dir_to_remove = self.files.iter().find(|(_, info)| info.name == name);
 
         if let Some((&dir_ino, info)) = dir_to_remove {
-            if info.kind == FileType::Directory {
+            if info.attr.kind == FileType::Directory {
                 let not_empty = self
                     .files
                     .iter()
@@ -195,7 +192,7 @@ impl Store for MemoryStore {
 
         self.files.iter().for_each(|(ino_child, info)| {
             if info.parent.is_some() && info.parent.unwrap() == ino {
-                entries.push((*ino_child, info.kind, info.name.to_string()));
+                entries.push((*ino_child, info.attr.kind, info.name.to_string()));
             }
         });
 

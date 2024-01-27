@@ -9,8 +9,10 @@ use store::store::StoreType;
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let mountpoint = "/tmp/fusefs";
-    let store_type = StoreType::InMemory;
-    // let store_type = StoreType::Etcd;
+    let store_type = {
+        StoreType::InMemory
+        // StoreType::Etcd
+    };
 
     let file_system = FuseFS::new(&store_type);
 
@@ -23,7 +25,10 @@ async fn main() -> io::Result<()> {
 
     let opts = &[MountOption::AllowOther, MountOption::AutoUnmount];
 
-    println!("Mounting {} using mode [{:?}]...", mountpoint, store_type);
+    println!(
+        "Mounting fuse filesystem on [{}] using mode [{:?}]...",
+        mountpoint, store_type
+    );
 
     fuser::mount2(file_system, mountpoint, opts)
 }

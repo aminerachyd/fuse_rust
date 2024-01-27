@@ -7,7 +7,6 @@ type Ino = u64;
 pub struct FileInfo {
     pub parent: Option<Ino>,
     pub name: String,
-    pub kind: FileType,
     pub attr: FileAttr,
 }
 
