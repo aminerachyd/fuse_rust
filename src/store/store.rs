@@ -50,3 +50,9 @@ pub trait Store {
         size: Option<u64>,
     ) -> Option<FileAttr>;
 }
+
+#[derive(Debug)]
+pub enum StoreType {
+    InMemory,
+    Etcd,
+}

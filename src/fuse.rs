@@ -1,4 +1,8 @@
-use crate::store::{etcd_store::EtcdStore, memory_store::MemoryStore, store::Store};
+use crate::store::{
+    etcd_store::EtcdStore,
+    memory_store::MemoryStore,
+    store::{Store, StoreType},
+};
 use fuser::{consts::FOPEN_KEEP_CACHE, Filesystem};
 use libc::ENOENT;
 use std::time::{Duration, SystemTime};
@@ -10,13 +14,21 @@ pub struct FuseFS {
 }
 
 impl FuseFS {
-    pub fn new() -> Self {
-        // let store = MemoryStore::new().unwrap();
-        let store = EtcdStore::new().unwrap();
-
-        return Self {
-            store: Box::new(store),
-        };
+    pub fn new(store_type: &StoreType) -> Self {
+        match store_type {
+            StoreType::InMemory => {
+                let store = MemoryStore::new().unwrap();
+                return Self {
+                    store: Box::new(store),
+                };
+            }
+            StoreType::Etcd => {
+                let store = EtcdStore::new().unwrap();
+                return Self {
+                    store: Box::new(store),
+                };
+            }
+        }
     }
 }
 
