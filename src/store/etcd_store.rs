@@ -10,6 +10,7 @@ use std::{
 };
 
 type Ino = u64;
+const DEFAULT_ETCD_ENDPOINT: &str = "localhost:2379";
 
 pub struct EtcdStore {
     ino_count: Ino,
@@ -30,12 +31,11 @@ impl Store for EtcdStore {
     type Ino = Ino;
 
     fn new() -> io::Result<Self> {
-        // let endpoint = env::var("ETCD_ENDPOINT").expect("Expected Etcd endpoint");
-        let endpoint = "localhost:2379";
+        let endpoint = get_etcd_endpoint_from_env(DEFAULT_ETCD_ENDPOINT.to_string());
 
         let (tx, rx) = mpsc::channel();
         tokio::spawn(async move {
-            println!("Connecting to Etcd on endpoint {}", endpoint);
+            println!("Connecting to Etcd on endpoint [{}]", endpoint);
             let mut client = Client::connect([endpoint], None)
                 .await
                 .expect("Couldn't connect to server");
@@ -45,7 +45,7 @@ impl Store for EtcdStore {
                 Ok(res) => {
                     println!("Connected to Etcd, members list:");
                     res.members().iter().for_each(|m| {
-                        println!("Etcd member: {:?}", m);
+                        println!("Etcd member: [{:?}]", m);
                     });
 
                     let root_dir_attr = FileAttr {
@@ -78,12 +78,12 @@ impl Store for EtcdStore {
                             let _ = tx.send(client);
                         }
                         Err(e) => {
-                            panic!("Couldn't create root dir: {}", e);
+                            panic!("Couldn't create root dir: [{}]", e);
                         }
                     }
                 }
                 Err(e) => {
-                    println!("Couldn't get Etcd member list: {}", e);
+                    println!("Couldn't get Etcd member list: [{}]", e);
                 }
             }
         });
@@ -211,11 +211,12 @@ impl Store for EtcdStore {
                                     parent: Some(parent),
                                 };
 
-                                tx.send(Some((ino.parse::<Ino>().unwrap(), file_info)));
+                                tx.send(Some((ino.parse::<Ino>().unwrap(), file_info)))
+                                    .unwrap();
                             });
                         }
                         Err(_) => {
-                            tx.send(None);
+                            tx.send(None).unwrap();
                         }
                     }
                 });
@@ -251,11 +252,11 @@ impl Store for EtcdStore {
                             data[start..end].to_vec()
                         };
 
-                        tx.send(Ok(data));
+                        tx.send(Ok(data)).unwrap();
                     });
                 }
                 Err(_) => {
-                    tx.send(Err(ErrorKind::NotFound.into()));
+                    tx.send(Err(ErrorKind::NotFound.into())).unwrap();
                 }
             }
         });
@@ -268,10 +269,6 @@ impl Store for EtcdStore {
     }
 
     fn write_data(&mut self, ino: Ino, data: &[u8], offset: i64) -> io::Result<u32> {
-        let mut is_appending = false;
-        if offset > 0 {
-            is_appending = true;
-        }
         let data = data.to_vec();
         let len = data.len();
         let (tx, rx) = mpsc::channel::<io::Result<()>>();
@@ -296,12 +293,12 @@ impl Store for EtcdStore {
                     let res = client.put(ino.to_string(), payload, None).await;
 
                     match res {
-                        Ok(_) => tx.send(Ok(())),
-                        Err(_) => tx.send(Err(ErrorKind::BrokenPipe.into())),
+                        Ok(_) => tx.send(Ok(())).unwrap(),
+                        Err(_) => tx.send(Err(ErrorKind::BrokenPipe.into())).unwrap(),
                     };
                 }
                 Err(_) => {
-                    tx.send(Err(ErrorKind::NotFound.into()));
+                    tx.send(Err(ErrorKind::NotFound.into())).unwrap();
                 }
             }
         });
@@ -327,10 +324,10 @@ impl Store for EtcdStore {
                         .unwrap()
                         .parse::<Ino>()
                         .unwrap();
-                    tx.send(Some(ino));
+                    tx.send(Some(ino)).unwrap();
                 }
                 Err(_) => {
-                    tx.send(None);
+                    tx.send(None).unwrap();
                 }
             }
         });
@@ -364,8 +361,8 @@ impl Store for EtcdStore {
             let res = client.put(new_ino.to_string(), payload, None).await;
 
             match res {
-                Ok(_) => tx.send(Ok(())),
-                Err(_) => tx.send(Err(())),
+                Ok(_) => tx.send(Ok(())).unwrap(),
+                Err(_) => tx.send(Err(())).unwrap(),
             }
         });
 
@@ -416,7 +413,7 @@ impl Store for EtcdStore {
                 }
             }
 
-            tx.send(result);
+            tx.send(result).unwrap();
         });
 
         let res = rx.recv();
@@ -443,11 +440,11 @@ impl Store for EtcdStore {
                         let file_data = serde_yaml::from_str::<FileData>(data).unwrap();
                         let attr = file_data.attr.clone();
 
-                        tx.send(Some(attr));
+                        tx.send(Some(attr)).unwrap();
                     });
                 }
                 Err(_) => {
-                    tx.send(None);
+                    tx.send(None).unwrap();
                 }
             }
         });
@@ -476,10 +473,10 @@ impl Store for EtcdStore {
                     .collect();
 
                 for ino in inos_to_delete.iter() {
-                    client.delete(ino.to_owned(), None).await;
+                    let _ = client.delete(ino.to_owned(), None).await;
                 }
 
-                tx.send(Ok(()));
+                tx.send(Ok(())).unwrap();
             });
 
             let res = rx.recv();
@@ -538,16 +535,16 @@ impl Store for EtcdStore {
                         match res {
                             Ok(_) => {
                                 let attr = file_data.attr.clone();
-                                tx.send(Some(attr));
+                                tx.send(Some(attr)).unwrap();
                             }
                             Err(_) => {
-                                tx.send(None);
+                                tx.send(None).unwrap();
                             }
                         };
                     }
                 }
                 Err(_) => {
-                    tx.send(None);
+                    tx.send(None).unwrap();
                 }
             }
         });
@@ -582,5 +579,20 @@ fn create_attr(ino: Ino, uid: u32, gid: u32, kind: FileType) -> FileAttr {
         rdev: 0,
         flags: 0,
         blksize: 512,
+    }
+}
+
+fn get_etcd_endpoint_from_env(default: String) -> String {
+    let endpoint_env = std::env::var("FUSEFS_ETCD_ENDPOINT");
+
+    if let Ok(endpoint) = endpoint_env {
+        println!("Proceeding with Etcd endpoint [{}]", endpoint);
+        return endpoint;
+    } else {
+        println!(
+            "No Etcd endpoint specified, proceeding with default endpoint [{}]",
+            default
+        );
+        return default;
     }
 }
