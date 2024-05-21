@@ -11,4 +11,6 @@ fuser = { version = "0.14.0", features = ["serializable"] }
 libc = "0.2.152"
 serde = { version = "1.0.195", features = ["derive"] }
 serde_yaml = "0.9.30"
+signal-hook = "0.3.17"
+syscalls = "0.6.18"
 tokio = { version = "1.35.1", features = ["macros", "rt-multi-thread"] }

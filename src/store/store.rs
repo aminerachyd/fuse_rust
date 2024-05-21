@@ -11,7 +11,7 @@ pub struct FileInfo {
 }
 
 // Simplified interface to provide storage for files and directories
-pub trait Store {
+pub trait Store: Send {
     type Ino: 'static;
 
     fn new() -> io::Result<Self>
