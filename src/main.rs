@@ -1,13 +1,14 @@
 mod fuse;
 mod store;
 mod upgrade;
+mod exit;
 
 use fuse::FuseFS;
 use fuser::MountOption;
 use std::{env, fs, io, sync::mpsc, thread};
 use store::store::StoreType;
-use signal_hook::{consts::{SIGTERM,SIGINT}, iterator::Signals};
-use upgrade::upgrade_sock;
+use exit::{graceful_exit, handle_signal};
+use signal_hook::{consts::{SIGTERM, SIGINT}, iterator::Signals};
 
 const DEFAULT_STORE_TYPE: StoreType = StoreType::InMemory;
 const DEFAULT_MOUNTPOINT: &str = "/tmp/fusefs";
@@ -26,51 +27,28 @@ async fn main() -> io::Result<()> {
         mountpoint, store_type
     );
 
-    let (tx, rx) = mpsc::channel();
+    let (unmount_tx, unmount_rx) = mpsc::channel();
+    let (sig_tx, sig_rx) = mpsc::channel::<i32>();
 
     let mut signals = Signals::new(&[SIGTERM, SIGINT])?;
+    let mut sig_count = 0;
     thread::spawn(move || {
         for sig in signals.forever() {
-            graceful_exit(sig, &rx, upgrade);
+            handle_signal(sig, &sig_tx, &mut sig_count);
         }
     });
 
-    let _ = tx.send(fuser::mount2(file_system, mountpoint, opts));
+    thread::spawn(move || {
+        loop {
+           graceful_exit(&unmount_rx, &sig_rx, upgrade);
+        }
+    });
+
+    let _ = unmount_tx.send(fuser::mount2(file_system, mountpoint, opts));
 
     Ok(())
 }
 
-fn graceful_exit(sig: i32, rx: &mpsc::Receiver<io::Result<()>>, upgrade: bool) {
-    match sig {
-        SIGINT => {
-            println!("Received SIGINT, waiting for file system to be unmounted to exit gracefully");
-        }
-        SIGTERM => {
-            println!("Received SIGTERM, waiting for file system to be unmounted to exit gracefully");
-        }
-        _ => {
-            println!("Unhandled signal received: [{}], ignoring", sig);
-        }
-    }
-
-    let mut code = 0;
-
-    match rx.recv() {
-        Ok(Ok(_)) => {
-            println!("Successfully unmmounted FUSE filesystem. Exiting");
-        },
-        Ok(Err(e)) => {
-            eprintln!("Failed to mount fuse filesystem: {:?}", e);
-            code = 1;
-        },
-        Err(e) => {
-            eprintln!("Failed to communicate unmount result: {:?}", e);
-            code = 1;
-        },
-    }
-
-    std::process::exit(code);
-}
 
 fn get_store_from_env(default: StoreType) -> StoreType {
     let store_env = env::var("FUSEFS_STORE_TYPE");
