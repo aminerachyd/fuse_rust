@@ -1,4 +1,4 @@
-use crate::upgrade::graceful_upgrade;
+use crate::upgrade::exit_graceful_upgrade;
 use signal_hook::consts::{SIGTERM, SIGINT};
 use std::{io, sync::mpsc};
 
@@ -32,7 +32,7 @@ pub fn graceful_exit(unmount_rx: &mpsc::Receiver<io::Result<()>>, sig_rx: &mpsc:
         // Looping until we receive an exit signal
         if let Ok(_) = sig_rx.try_recv() {
             if upgrade == true {
-                let exit_code = graceful_upgrade();
+                let exit_code = exit_graceful_upgrade();
                 // std::process::exit(exit_code);
             }
 

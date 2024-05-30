@@ -2,6 +2,7 @@ mod fuse;
 mod store;
 mod upgrade;
 mod exit;
+mod consts;
 
 use fuse::FuseFS;
 use fuser::MountOption;
@@ -9,15 +10,17 @@ use std::{env, fs, io, sync::mpsc, thread};
 use store::store::StoreType;
 use exit::{graceful_exit, handle_signal};
 use signal_hook::{consts::{SIGTERM, SIGINT}, iterator::Signals};
-
-const DEFAULT_STORE_TYPE: StoreType = StoreType::InMemory;
-const DEFAULT_MOUNTPOINT: &str = "/tmp/fusefs";
+use upgrade::start_graceful_upgrade;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let upgrade = env::args().into_iter().find(|arg| arg == "--upgrade").is_some();
-    let store_type = get_store_from_env(DEFAULT_STORE_TYPE);
-    let mountpoint = get_mountpoint_from_env(DEFAULT_MOUNTPOINT.to_string());
+    if upgrade {
+        start_graceful_upgrade();
+    }
+
+    let store_type = get_store_from_env(consts::DEFAULT_STORE_TYPE);
+    let mountpoint = get_mountpoint_from_env(consts::DEFAULT_MOUNTPOINT.to_string());
     let file_system = FuseFS::new(&store_type);
 
     let opts = &[MountOption::AllowOther, MountOption::AutoUnmount];
