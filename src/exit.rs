@@ -1,3 +1,4 @@
+use crate::upgrade::graceful_upgrade;
 use signal_hook::consts::{SIGTERM, SIGINT};
 use std::{io, sync::mpsc};
 
@@ -30,23 +31,33 @@ pub fn graceful_exit(unmount_rx: &mpsc::Receiver<io::Result<()>>, sig_rx: &mpsc:
     loop {
         // Looping until we receive an exit signal
         if let Ok(_) = sig_rx.try_recv() {
-            let mut code = 0;
-        
-            match unmount_rx.recv() {
-                Ok(Ok(_)) => {
-                    println!("Successfully unmmounted FUSE filesystem. Exiting");
-                },
-                Ok(Err(e)) => {
-                    eprintln!("Failed to mount fuse filesystem: {:?}", e);
-                    code = 1;
-                },
-                Err(e) => {
-                    eprintln!("Failed to communicate unmount result: {:?}", e);
-                    code = 1;
-                },
+            if upgrade == true {
+                let exit_code = graceful_upgrade();
+                // std::process::exit(exit_code);
             }
 
-        std::process::exit(code);
+            let exit_code = wait_for_fs_unmount(unmount_rx);
+            std::process::exit(exit_code);
         }
     }
+}
+
+fn wait_for_fs_unmount(rx: &mpsc::Receiver<io::Result<()>>) -> i32 {
+   let mut code = 0;
+   
+   match rx.recv() {
+       Ok(Ok(_)) => {
+           println!("Successfully unmmounted FUSE filesystem. Exiting");
+       },
+       Ok(Err(e)) => {
+           eprintln!("Failed to mount fuse filesystem: {:?}", e);
+           code = 1;
+       },
+       Err(e) => {
+           eprintln!("Failed to communicate unmount result: {:?}", e);
+           code = 1;
+       },
+   }
+
+   code
 }
