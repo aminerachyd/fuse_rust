@@ -1,6 +1,7 @@
 use crate::upgrade::exit_graceful_upgrade;
 use signal_hook::consts::{SIGTERM, SIGINT};
-use std::{io, sync::mpsc};
+use crate::consts::SOCKET_UPGRADE_PATH;
+use std::{io, sync::mpsc, fs};
 
 const MAX_SIG_COUNT: u8 = 1;
 
@@ -8,6 +9,7 @@ pub fn handle_signal(sig: i32, sig_tx: &mpsc::Sender<i32>, sig_count: &mut u8) {
     *sig_count += 1;    
     if *sig_count > MAX_SIG_COUNT {
         println!("Received multiple signals, exiting immediately");
+        let _ = fs::remove_file(SOCKET_UPGRADE_PATH);
         std::process::exit(1);
     }
 

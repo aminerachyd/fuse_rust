@@ -101,14 +101,15 @@ fn get_mountpoint_from_env(default: String) -> String {
     if let Err(_) = fs::read_dir(mountpoint.clone()) {
         println!("Creating mountpoint [{}]", mountpoint.clone());
         fs::create_dir(mountpoint.clone()).unwrap();
-    } else {
-        println!(
-            "Mountpoint [{}] already exists, removing it and creating a new one",
-            mountpoint.clone()
-        );
-        fs::remove_dir_all(mountpoint.clone()).unwrap();
-        fs::create_dir(mountpoint.clone()).unwrap();
     }
+    // } else {
+    //     println!(
+    //         "Mountpoint [{}] already exists, removing it and creating a new one",
+    //         mountpoint.clone()
+    //     );
+    //     fs::remove_dir_all(mountpoint.clone()).unwrap();
+    //     fs::create_dir(mountpoint.clone()).unwrap();
+    // }
 
     mountpoint
 }
