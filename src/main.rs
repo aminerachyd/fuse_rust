@@ -6,24 +6,31 @@ mod consts;
 
 use fuse::FuseFS;
 use fuser::MountOption;
-use std::{env, fs, io, sync::mpsc, thread};
+use std::{env, fs, io::{self, ErrorKind}, sync::mpsc, thread};
 use store::store::StoreType;
 use exit::{graceful_exit, handle_signal};
 use signal_hook::{consts::{SIGTERM, SIGINT}, iterator::Signals};
 use upgrade::start_graceful_upgrade;
 
+use crate::consts::SOCKET_UPGRADE_PATH;
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let upgrade = env::args().into_iter().find(|arg| arg == "--upgrade").is_some();
-    if upgrade {
-        start_graceful_upgrade();
-    }
 
     let store_type = get_store_from_env(consts::DEFAULT_STORE_TYPE);
     let mountpoint = get_mountpoint_from_env(consts::DEFAULT_MOUNTPOINT.to_string());
     let file_system = FuseFS::new(&store_type);
 
-    let opts = &[MountOption::AllowOther, MountOption::AutoUnmount];
+    if upgrade && fs::metadata(SOCKET_UPGRADE_PATH).is_ok() {
+        start_graceful_upgrade(file_system);
+    } else {
+        println!("Upgrade socket does not exist, not performing graceful upgrade");
+    let opts: &[MountOption] = if upgrade {
+        &[MountOption::AllowOther]
+    } else {
+        &[MountOption::AllowOther, MountOption::AutoUnmount]
+    };
 
     println!(
         "Mounting fuse filesystem on [{}] using mode [{:?}]...",
@@ -48,6 +55,9 @@ async fn main() -> io::Result<()> {
     });
 
     let _ = unmount_tx.send(fuser::mount2(file_system, mountpoint, opts));
+
+    }
+
 
     Ok(())
 }
@@ -98,9 +108,16 @@ fn get_mountpoint_from_env(default: String) -> String {
         mountpoint = default.to_string();
     }
 
-    if let Err(_) = fs::read_dir(mountpoint.clone()) {
-        println!("Creating mountpoint [{}]", mountpoint.clone());
-        fs::create_dir(mountpoint.clone()).unwrap();
+    if let Err(e) = fs::metadata(&mountpoint) {
+        match e.kind() {
+            ErrorKind::NotConnected => {
+                println!("Mountpoint [{}] is broken but the file exists, not removing it", &mountpoint);
+            },
+            _ => {
+                println!("Creating mountpoint [{}]", mountpoint.clone());
+                fs::create_dir(mountpoint.clone()).unwrap();
+            }
+        }
     }
     // } else {
     //     println!(

@@ -3,7 +3,7 @@ use crate::store::{
     memory_store::MemoryStore,
     store::{Store, StoreType},
 };
-use fuser::{consts::FOPEN_KEEP_CACHE, Filesystem};
+use fuser::{Filesystem, ReplyAttr, Request, consts::FOPEN_KEEP_CACHE};
 use libc::ENOENT;
 use std::time::{Duration, SystemTime};
 
@@ -204,7 +204,7 @@ impl Filesystem for FuseFS {
     }
 
     // Misc
-    fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
         //dbg!("GETATTR");
         let attr = self.store.get_file_attr(ino);
 

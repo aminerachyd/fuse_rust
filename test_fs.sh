@@ -1,10 +1,14 @@
 #!/bin/bash
 
+// This is a simple test script to test the basic functionality of the Fuse filesystem.
+// This test will handle mounting the filesystem, creating some files and directories, updating them
+// and then unmounting the filesystem.
+
 fs_dir=/tmp/fusefs
 
-cargo run& 
-echo "Waiting for 10 seconds for Fuse server to start..."
-sleep 10
+# cargo run& 
+# echo "Waiting for 10 seconds for Fuse server to start..."
+# sleep 10
 
 cd $fs_dir
 

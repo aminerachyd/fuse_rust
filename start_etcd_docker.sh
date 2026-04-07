@@ -8,4 +8,7 @@ docker run -d --name etcd-server \
    --publish 2379:2379 \
    --publish 2380:2380 \
    --env ALLOW_NONE_AUTHENTICATION=yes \
-   bitnami/etcd:latest
+   quay.io/coreos/etcd:v3.6.10 \
+   etcd \
+   --advertise-client-urls http://0.0.0.0:2379 \
+   --listen-client-urls http://0.0.0.0:2379

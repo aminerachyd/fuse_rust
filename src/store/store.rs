@@ -34,7 +34,7 @@ pub trait Store: Send {
     // Dirs
     fn lookup_file(&self, name: String, parent: Ino) -> Option<(Ino, FileInfo)>;
     fn create_dir(&mut self, name: String, parent: Ino, uid: u32, gid: u32)
-        -> io::Result<FileAttr>;
+    -> io::Result<FileAttr>;
 
     fn delete_dir(&mut self, name: String) -> io::Result<()>;
     fn get_dir_entries(&self, ino: Ino) -> Vec<(u64, FileType, String)>;

@@ -1,25 +1,41 @@
-use std::{mem, ptr, fs};
+use crate::{consts::SOCKET_UPGRADE_PATH, fuse::FuseFS};
 use errno::errno;
-use crate::consts::SOCKET_UPGRADE_PATH;
+use fuser::{Filesystem, Session};
+use std::{
+    fs, mem,
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    ptr,
+};
 
 #[repr(C)]
 struct ScmCmsgHeader {
-    cmsg_len: libc::c_uint,
+    cmsg_len: usize,
     cmsg_level: libc::c_int,
     cmsg_type: libc::c_int,
     fd: libc::c_int,
 }
 
-pub fn start_graceful_upgrade() -> i32 {
-    if fs::metadata(SOCKET_UPGRADE_PATH).is_ok() {
-        println!("Upgrade socket exists, performing upgrade");
-        unsafe {
-            // TODO continue here
-            let fuse_fd = recv_fd_from_peer();
-        }
-    }
+pub fn start_graceful_upgrade(fs: FuseFS) -> i32 {
+    println!("Upgrade socket exists, performing upgrade");
+    let fuse_fd = unsafe {
+        let fuse_fd = recv_fd_from_peer();
+        OwnedFd::from_raw_fd(fuse_fd)
+    };
 
-    0
+    let acl = fuser::SessionACL::All;
+    let mut session = Session::from_fd(fs, fuse_fd, acl);
+
+    println!("Starting fuse session with transferred file descriptor");
+    match session.run() {
+        Ok(_) => {
+            println!("Fuse session ended successfully");
+            return 0;
+        }
+        Err(e) => {
+            eprintln!("Fuse session ended with error: {:?}", e);
+            return -1;
+        },
+    }
 }
 
 pub fn exit_graceful_upgrade() -> i32 {
@@ -56,14 +72,22 @@ unsafe fn create_bind_socket() -> i32 {
     // Binding the socket, creates the socket file
     let mut addr = libc::sockaddr_un {
         sun_family: libc::AF_UNIX as u16,
-        sun_path: [0; 108]
+        sun_path: [0; 108],
     };
     for (i, c) in SOCKET_UPGRADE_PATH.chars().enumerate() {
         addr.sun_path[i] = c as i8;
     }
-    let result = libc::bind(sock_fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, mem::size_of::<libc::sockaddr_un>() as u32);
+    let result = libc::bind(
+        sock_fd,
+        &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+        mem::size_of::<libc::sockaddr_un>() as u32,
+    );
     if result < 0 {
-        panic!("Failed to bind socket. Error code [{}]. Errno [{}]", errno().0, errno());
+        panic!(
+            "Failed to bind socket. Error code [{}]. Errno [{}]",
+            errno().0,
+            errno()
+        );
     }
 
     println!("Upgrade socket created and bound successfully");
@@ -75,16 +99,23 @@ unsafe fn listen_on_socket(sock_fd: i32) -> i32 {
     let result = libc::listen(sock_fd, 1);
     if result < 0 {
         panic!("Failed to listen on socket. Error code [{}]", result);
-    } 
+    }
 
     println!("Starting listening on socket");
 
     let peer_fd = libc::accept(sock_fd, std::ptr::null_mut(), std::ptr::null_mut());
     if peer_fd < 0 {
-        panic!("Failed to accept connection on socket. Error code [{}]. Errno is [{}]", errno().0, errno());
+        panic!(
+            "Failed to accept connection on socket. Error code [{}]. Errno is [{}]",
+            errno().0,
+            errno()
+        );
     }
 
-    println!("Accepted connection on socket. Peer socket file descriptor [{}]", peer_fd);
+    println!(
+        "Accepted connection on socket. Peer socket file descriptor [{}]",
+        peer_fd
+    );
 
     peer_fd
 }
@@ -97,16 +128,24 @@ unsafe fn recv_fd_from_peer() -> i32 {
 
     let mut addr = libc::sockaddr_un {
         sun_family: libc::AF_UNIX as u16,
-        sun_path: [0; 108]
+        sun_path: [0; 108],
     };
     for (i, c) in SOCKET_UPGRADE_PATH.chars().enumerate() {
         addr.sun_path[i] = c as i8;
     }
 
     println!("Connecting to socket");
-    let result = libc::connect(sock_fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, mem::size_of::<libc::sockaddr_un>() as u32);
+    let result = libc::connect(
+        sock_fd,
+        &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+        mem::size_of::<libc::sockaddr_un>() as u32,
+    );
     if result < 0 {
-        panic!("Failed to connect to socket. Error code [{}]. Errno was [{}]", errno().0, errno());
+        panic!(
+            "Failed to connect to socket. Error code [{}]. Errno was [{}]",
+            errno().0,
+            errno()
+        );
     }
     println!("Connected to addr, sock_fd [{}]", sock_fd);
 
@@ -117,9 +156,10 @@ unsafe fn recv_fd_from_peer() -> i32 {
         fd: 0,
     };
 
+    let mut buf = [0u8; 2];
     let mut iov = libc::iovec {
-        iov_base: ptr::null_mut(),
-        iov_len: 0,
+        iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
     };
 
     let mut mhdr = libc::msghdr {
@@ -145,7 +185,7 @@ unsafe fn recv_fd_from_peer() -> i32 {
 
 unsafe fn send_fd_to_peer(peer_fd: i32, fd: i32) {
     let scmhdr = ScmCmsgHeader {
-        cmsg_len: mem::size_of::<libc::cmsghdr>() as libc::c_uint,
+        cmsg_len: (mem::size_of::<libc::cmsghdr>() + mem::size_of::<libc::c_int>()) as usize,
         cmsg_level: libc::SOL_SOCKET,
         cmsg_type: libc::SCM_RIGHTS,
         fd,
@@ -169,8 +209,13 @@ unsafe fn send_fd_to_peer(peer_fd: i32, fd: i32) {
     println!("Sending fd [{}] to peer [{}]", fd, peer_fd);
     let result = libc::sendmsg(peer_fd, &msg, 0);
     if result < 0 {
-        panic!("Failed to send fd to peer. Error code [{}]. Errno is [{}]", errno().0, errno());
+        panic!(
+            "Failed to send fd to peer. Error code [{}]. Errno is [{}]",
+            errno().0,
+            errno()
+        );
     }
+    println!("Sent fd to peer successfully");
 }
 
 fn find_fuse_fd() -> i32 {
@@ -182,7 +227,11 @@ fn find_fuse_fd() -> i32 {
                 let path = entry.path();
                 let fd = path.file_name().unwrap().to_str().unwrap();
 
-                return fs::read_link(format!("/proc/self/fd/{}", fd)).unwrap().to_str().unwrap() == "/dev/fuse";
+                return fs::read_link(format!("/proc/self/fd/{}", fd))
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    == "/dev/fuse";
             }
 
             false
