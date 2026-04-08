@@ -5,38 +5,25 @@ mod exit;
 mod consts;
 
 use fuse::FuseFS;
-use fuser::MountOption;
+use fuser::{MountOption, Session, SessionACL};
 use std::{env, fs, io::{self, ErrorKind}, sync::mpsc, thread};
 use store::store::StoreType;
 use exit::{graceful_exit, handle_signal};
 use signal_hook::{consts::{SIGTERM, SIGINT}, iterator::Signals};
-use upgrade::start_graceful_upgrade;
+use upgrade::receive_fuse_fd;
 
 use crate::consts::SOCKET_UPGRADE_PATH;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let upgrade = env::args().into_iter().find(|arg| arg == "--upgrade").is_some();
+    let upgrade = env::args().any(|arg| arg == "--upgrade");
 
     let store_type = get_store_from_env(consts::DEFAULT_STORE_TYPE);
     let mountpoint = get_mountpoint_from_env(consts::DEFAULT_MOUNTPOINT.to_string());
     let file_system = FuseFS::new(&store_type);
 
-    if upgrade && fs::metadata(SOCKET_UPGRADE_PATH).is_ok() {
-        start_graceful_upgrade(file_system);
-    } else {
-        println!("Upgrade socket does not exist, not performing graceful upgrade");
-    let opts: &[MountOption] = if upgrade {
-        &[MountOption::AllowOther]
-    } else {
-        &[MountOption::AllowOther, MountOption::AutoUnmount]
-    };
-
-    println!(
-        "Mounting fuse filesystem on [{}] using mode [{:?}]...",
-        mountpoint, store_type
-    );
-
+    // Signal handling — set up for both normal and upgrade paths so that
+    // every instance can hand off the fuse fd to the next one.
     let (unmount_tx, unmount_rx) = mpsc::channel();
     let (sig_tx, sig_rx) = mpsc::channel::<i32>();
 
@@ -54,10 +41,30 @@ async fn main() -> io::Result<()> {
         }
     });
 
-    let _ = unmount_tx.send(fuser::mount2(file_system, mountpoint, opts));
+    if upgrade && fs::metadata(SOCKET_UPGRADE_PATH).is_ok() {
+        println!("Upgrade socket exists, performing upgrade");
+        let fuse_fd = receive_fuse_fd();
+        let mut session = Session::from_fd(file_system, fuse_fd, SessionACL::All);
+        println!("Starting fuse session with transferred file descriptor");
+        let _ = unmount_tx.send(session.run());
+    } else {
+        if upgrade {
+            println!("Upgrade socket does not exist, not performing graceful upgrade");
+        }
 
+        let opts: &[MountOption] = if upgrade {
+            &[MountOption::AllowOther]
+        } else {
+            &[MountOption::AllowOther, MountOption::AutoUnmount]
+        };
+
+        println!(
+            "Mounting fuse filesystem on [{}] using mode [{:?}]...",
+            mountpoint, store_type
+        );
+
+        let _ = unmount_tx.send(fuser::mount2(file_system, mountpoint, opts));
     }
-
 
     Ok(())
 }

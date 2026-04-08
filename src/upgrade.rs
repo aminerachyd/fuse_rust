@@ -1,9 +1,8 @@
-use crate::{consts::SOCKET_UPGRADE_PATH, fuse::FuseFS};
+use crate::consts::SOCKET_UPGRADE_PATH;
 use errno::errno;
-use fuser::{Filesystem, Session};
 use std::{
     fs, mem,
-    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{FromRawFd, OwnedFd},
     ptr,
 };
 
@@ -15,26 +14,10 @@ struct ScmCmsgHeader {
     fd: libc::c_int,
 }
 
-pub fn start_graceful_upgrade(fs: FuseFS) -> i32 {
-    println!("Upgrade socket exists, performing upgrade");
-    let fuse_fd = unsafe {
+pub fn receive_fuse_fd() -> OwnedFd {
+    unsafe {
         let fuse_fd = recv_fd_from_peer();
         OwnedFd::from_raw_fd(fuse_fd)
-    };
-
-    let acl = fuser::SessionACL::All;
-    let mut session = Session::from_fd(fs, fuse_fd, acl);
-
-    println!("Starting fuse session with transferred file descriptor");
-    match session.run() {
-        Ok(_) => {
-            println!("Fuse session ended successfully");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("Fuse session ended with error: {:?}", e);
-            return -1;
-        },
     }
 }
 
